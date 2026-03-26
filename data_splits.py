@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import shutil
 
@@ -13,6 +14,30 @@ from DataProcessing.find_and_load_patient_files import (
 )
 from DataProcessing.label_extraction import get_murmur, get_outcome
 from DataProcessing.XGBoost_features.metadata import get_metadata
+
+
+# ==============================================================================
+# === PARCHE: SPLIT FORZADO DESDE JSON EXTERNO ===
+# Reemplaza el train_test_split interno de PathToMyHeart por los IDs
+# del proyecto propio (random_state=42, split por paciente, estratificado).
+#
+# Para desactivar el parche y usar el comportamiento original de PathToMyHeart,
+# cambia FORCE_EXTERNAL_SPLIT a False.
+# ==============================================================================
+FORCE_EXTERNAL_SPLIT = True
+EXTERNAL_SPLIT_JSON  = r"C:\Escuela\8\hackaton\Cinc\data\processed\patient_split.json"
+
+
+def load_external_split(json_path: str):
+    """Carga los IDs de paciente desde el JSON exportado por preprocess_audio.py."""
+    with open(json_path, "r") as f:
+        split = json.load(f)
+    # Aseguramos que todos los IDs sean strings sin espacios
+    return (
+        [str(x).strip() for x in split["train"]],
+        [str(x).strip() for x in split["val"]],
+        [str(x).strip() for x in split["test"]],
+    )
 
 
 def stratified_test_vali_split(
@@ -41,9 +66,7 @@ def stratified_test_vali_split(
     murmurs = list()
     outcomes = list()
     for i in tqdm(range(num_patient_files)):
-        # Load the current patient data and recordings.
         current_patient_data = load_patient_data(patient_files[i])
-        # Extract features.
         current_features = get_metadata(current_patient_data)
         current_features = np.insert(
             current_features, 0, current_patient_data.split(" ")[0]
@@ -52,38 +75,26 @@ def stratified_test_vali_split(
             current_features, 1, current_patient_data.split(" ")[2][:-3]
         )
         features.append(current_features)
-        # Extract labels and use one-hot encoding.
-        # Murmur
         current_murmur = np.zeros(num_murmur_classes, dtype=int)
         murmur = get_murmur(current_patient_data)
         if murmur in murmur_classes:
             j = murmur_classes.index(murmur)
             current_murmur[j] = 1
         murmurs.append(current_murmur)
-        # Outcome
         current_outcome = np.zeros(num_outcome_classes, dtype=int)
         outcome = get_outcome(current_patient_data)
         if outcome in outcome_classes:
             j = outcome_classes.index(outcome)
             current_outcome[j] = 1
         outcomes.append(current_outcome)
+
     features = np.vstack(features)
     murmurs = np.vstack(murmurs)
     outcomes = np.vstack(outcomes)
 
-    # Combine dataframes
     features_pd = pd.DataFrame(
         features,
-        columns=[
-            "id",
-            "hz",
-            "age",
-            "female",
-            "male",
-            "height",
-            "weight",
-            "is_pregnant",
-        ],
+        columns=["id", "hz", "age", "female", "male", "height", "weight", "is_pregnant"],
     )
     murmurs_pd = pd.DataFrame(murmurs, columns=murmur_classes)
     outcomes_pd = pd.DataFrame(outcomes, columns=outcome_classes)
@@ -93,7 +104,59 @@ def stratified_test_vali_split(
         complete_pd[stratified_features].astype(str).agg("-".join, axis=1)
     )
 
-    # Split data
+    # ==========================================================================
+    # PARCHE: si FORCE_EXTERNAL_SPLIT está activo, ignoramos train_test_split
+    # y usamos directamente los IDs del JSON externo.
+    # ==========================================================================
+    if FORCE_EXTERNAL_SPLIT:
+        print(f"\n⚡ PARCHE ACTIVO: usando split externo desde:\n   {EXTERNAL_SPLIT_JSON}\n")
+        train_ids, val_ids, test_ids = load_external_split(EXTERNAL_SPLIT_JSON)
+
+        # Verificar que los IDs del JSON existen en este dataset
+        all_ids = set(complete_pd["id"].tolist())
+        missing_train = [x for x in train_ids if x not in all_ids]
+        missing_val   = [x for x in val_ids   if x not in all_ids]
+        missing_test  = [x for x in test_ids  if x not in all_ids]
+        if missing_train or missing_val or missing_test:
+            print(f"⚠ IDs no encontrados en training_data:")
+            print(f"  train: {missing_train[:5]}{'...' if len(missing_train)>5 else ''}")
+            print(f"  val:   {missing_val[:5]}{'...' if len(missing_val)>5 else ''}")
+            print(f"  test:  {missing_test[:5]}{'...' if len(missing_test)>5 else ''}")
+
+        complete_pd_train = complete_pd[complete_pd["id"].isin(train_ids)]
+        complete_pd_val   = complete_pd[complete_pd["id"].isin(val_ids)]
+        complete_pd_test  = complete_pd[complete_pd["id"].isin(test_ids)]
+
+        print(f"Split resultante:")
+        print(f"  Train: {len(complete_pd_train)} pacientes")
+        print(f"  Val:   {len(complete_pd_val)} pacientes")
+        print(f"  Test:  {len(complete_pd_test)} pacientes")
+
+        # Guardar
+        cnum = "seed_42_external"
+        save_folder = os.path.join(stratified_directory, "cv_False", cnum)
+        os.makedirs(os.path.join(save_folder, "train_data"), exist_ok=True)
+        os.makedirs(os.path.join(save_folder, "vali_data"),  exist_ok=True)
+        os.makedirs(os.path.join(save_folder, "test_data"),  exist_ok=True)
+
+        with open(os.path.join(save_folder, "split_details.txt"), "w") as f:
+            f.write("Split forzado desde JSON externo (random_state=42).\n")
+            f.write(f"Fuente: {EXTERNAL_SPLIT_JSON}\n")
+            f.write(f"Train: {len(complete_pd_train)} | Val: {len(complete_pd_val)} | Test: {len(complete_pd_test)}\n")
+
+        for pid in complete_pd_train["id"]:
+            copy_files(data_directory, pid, os.path.join(save_folder, "train_data/"))
+        for pid in complete_pd_val["id"]:
+            copy_files(data_directory, pid, os.path.join(save_folder, "vali_data/"))
+        for pid in complete_pd_test["id"]:
+            copy_files(data_directory, pid, os.path.join(save_folder, "test_data/"))
+
+        print(f"\n✅ Split guardado en: {save_folder}")
+        return  # <-- salimos, no ejecutamos el código original
+
+    # ==========================================================================
+    # CÓDIGO ORIGINAL (sin cambios) — solo se ejecuta si FORCE_EXTERNAL_SPLIT=False
+    # ==========================================================================
     complete_pd_train_list = list()
     complete_pd_val_list = list()
     complete_pd_test_list = list()
@@ -120,9 +183,7 @@ def stratified_test_vali_split(
         else:
             print("Performing random cross-validation")
             kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-            for i, (train_index, test_index) in enumerate(
-                kf.split(complete_pd)
-            ):
+            for i, (train_index, test_index) in enumerate(kf.split(complete_pd)):
                 cnums.append(f"split_{i}")
                 complete_pd_train, complete_pd_test = complete_pd.iloc[train_index], complete_pd.iloc[test_index]
                 vali_split = vali_size / (1 - test_size)
@@ -155,7 +216,6 @@ def stratified_test_vali_split(
             complete_pd_val_list.append(complete_pd_val)
             complete_pd_test_list.append(complete_pd_test)
 
-    # Save the files.
     for cnum, complete_pd_train, complete_pd_val, complete_pd_test in zip(
         cnums, complete_pd_train_list, complete_pd_val_list, complete_pd_test_list
     ):
@@ -172,29 +232,15 @@ def stratified_test_vali_split(
             for feature in stratified_features:
                 text_file.write(feature + ", ")
         for f in complete_pd_train["id"]:
-            copy_files(
-                data_directory,
-                f,
-                os.path.join(save_folder, "train_data/"),
-            )
+            copy_files(data_directory, f, os.path.join(save_folder, "train_data/"))
         for f in complete_pd_val["id"]:
-            copy_files(
-                data_directory,
-                f,
-                os.path.join(save_folder, "vali_data/"),
-            )
+            copy_files(data_directory, f, os.path.join(save_folder, "vali_data/"))
         for f in complete_pd_test["id"]:
-            copy_files(
-                data_directory,
-                f,
-                os.path.join(save_folder, "test_data/"),
-            )
+            copy_files(data_directory, f, os.path.join(save_folder, "test_data/"))
 
 
 def copy_files(data_directory: str, ident: str, stratified_directory: str) -> None:
-    # Get the list of files in the data folder.
     files = os.listdir(data_directory)
-    # Copy all files in data_directory that start with f to stratified_directory
     for f in files:
         if f.startswith(ident):
             _ = shutil.copy(os.path.join(data_directory, f), stratified_directory)
@@ -208,30 +254,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_directory",
         type=str,
-        help="The directory containing the data you wish to split.",
-        default="physionet.org/files/circor-heart-sound/1.0.3/training_data",
+        default=r"C:\Escuela\8\hackaton\Cinc\data\training_data",
+        help="Carpeta con los datos originales de PhysioNet.",
     )
     parser.add_argument(
         "--stratified_directory",
         type=str,
-        help="The directory to store the split data.",
-        default="data/a_splits",
+        default=r"C:\Escuela\8\hackaton\path\data\splits",
+        help="Carpeta donde se guardarán los splits.",
     )
-    parser.add_argument(
-        "--vali_size", type=float, default=0.16, help="The size of the test split."
-    )
-    parser.add_argument(
-        "--test_size", type=float, default=0.2, help="The size of the test split."
-    )
-    parser.add_argument(
-        "--cv", type=bool, default=False, help="Whether to run cv."
-    )
-    parser.add_argument(
-        "--stratified_cv", type=bool, default=False, help="Whether to run cv."
-    )
+    parser.add_argument("--vali_size",     type=float, default=0.15)
+    parser.add_argument("--test_size",     type=float, default=0.25)
+    parser.add_argument("--cv",            type=bool,  default=False)
+    parser.add_argument("--stratified_cv", type=bool,  default=False)
     args = parser.parse_args()
 
     stratified_features = ["Normal", "Abnormal", "Absent", "Present", "Unknown"]
-
-    # Create the test split.
     stratified_test_vali_split(stratified_features, **vars(args))

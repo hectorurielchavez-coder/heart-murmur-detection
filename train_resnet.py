@@ -65,14 +65,16 @@ def run_model_training(
         spectrogram_directory,
     )
     print("Data loaded")
-    
-    X_train = spectrograms_train.to(device)
-    X_test = spectrograms_test.to(device)
+
+    # Los tensores se quedan en CPU — train_model los mueve a GPU por batch internamente
+    X_train = spectrograms_train
+    X_test = spectrograms_test
+
     if classes_name == "murmur":
-        y_train = murmurs_train.to(device)
-        y_test = murmurs_test.to(device)
+        y_train = murmurs_train
+        y_test = murmurs_test
         model, training = create_model(model_name, 3, bayesian)
-        training(
+        model = training(
             X_train,
             y_train,
             clas_weight=weights,
@@ -83,10 +85,10 @@ def run_model_training(
             model_dir=model_dir,
         )
     elif classes_name == "outcome_binary":
-        y_train = outcomes_train.to(device)
-        y_test = outcomes_test.to(device)
+        y_train = outcomes_train
+        y_test = outcomes_test
         model, training = create_model(model_name, 2, bayesian)
-        training(
+        model = training(
             X_train,
             y_train,
             clas_weight=weights,
@@ -112,10 +114,10 @@ def run_model_training(
                 knowledge_test[i, 0] = 1
             else:
                 knowledge_test[i, 1] = 1
-        y_train = knowledge_train.to(device)
-        y_test = knowledge_test.to(device)
+        y_train = knowledge_train
+        y_test = knowledge_test
         model, training = create_model(model_name, 2, bayesian)
-        training(
+        model = training(
             X_train,
             y_train,
             clas_weight=weights,
@@ -132,19 +134,19 @@ def run_model_training(
                 torch.argmax(murmurs_train[i]) == 1
                 or torch.argmax(murmurs_train[i]) == 2
             ):
-                knowledge_train[i, 1] = 1
-            else:
                 knowledge_train[i, 0] = 1
+            else:
+                knowledge_train[i, 1] = 1
         knowledge_test = torch.zeros((murmurs_test.shape[0], 2))
         for i in range(len(murmurs_test)):
             if torch.argmax(murmurs_test[i]) == 1 or torch.argmax(murmurs_test[i]) == 2:
-                knowledge_test[i, 1] = 1
-            else:
                 knowledge_test[i, 0] = 1
-        y_train = knowledge_train.to(device)
-        y_test = knowledge_test.to(device)
+            else:
+                knowledge_test[i, 1] = 1
+        y_train = knowledge_train
+        y_test = knowledge_test
         model, training = create_model(model_name, 2, bayesian)
-        training(
+        model = training(
             X_train,
             y_train,
             clas_weight=weights,
@@ -170,10 +172,10 @@ def run_model_training(
                 knowledge_test[i, 1] = 1
             else:
                 knowledge_test[i, 0] = 1
-        y_train = knowledge_train.to(device)
-        y_test = knowledge_test.to(device)
+        y_train = knowledge_train
+        y_test = knowledge_test
         model, training = create_model(model_name, 2, bayesian)
-        training(
+        model = training(
             X_train,
             y_train,
             clas_weight=weights,
@@ -186,6 +188,10 @@ def run_model_training(
         )
     else:
         raise ValueError("classes_name must be one of outcome, murmur or knowledge.")
+
+    # Liberar VRAM antes de retornar
+    del model
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
@@ -246,9 +252,9 @@ if __name__ == "__main__":
         default="murmur",
     )
     parser.add_argument(
-        '--disable-bayesian', 
-        dest='bayesian', 
-        action='store_false', 
+        '--disable-bayesian',
+        dest='bayesian',
+        action='store_false',
         default=True,
         help='Disable Bayesian features (default: Bayesian is enabled)'
     )

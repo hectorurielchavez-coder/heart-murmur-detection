@@ -36,6 +36,7 @@ def main(
         cv,
     )
 
+    # Modelo 1: Present vs (Unknown + Absent)
     run_model_training(
         recalc_features,
         train_data_directory,
@@ -49,6 +50,7 @@ def main(
         None,
     )
 
+    # Modelo 2: Unknown vs (Present + Absent)
     run_model_training(
         recalc_features,
         train_data_directory,
@@ -62,21 +64,35 @@ def main(
         None,
     )
 
+    model_binary_present_pth = "data/models/model_BinaryPresent.pth"
+    model_binary_unknown_pth = "data/models/model_BinaryUnknown.pth"
+
+    # Evaluación DBRes (3 clases + binario automático)
     dbres_scores = calculate_dbres_scores(
+        model_name,
         recalc_output,
         test_data_directory,
         dbres_output_directory,
-        "data/models/model_BinaryPresent.pth",
-        "data/models/model_BinaryUnknown.pth",
+        model_binary_pth=None,
+        model_binary_present_pth=model_binary_present_pth,
+        model_binary_unknown_pth=model_binary_unknown_pth,
+        bayesian=bayesian,
     )
 
+    # Evaluación XGBoost integrado
     xgb_scores = calculate_xgboost_integration_scores(
+        model_name,
         train_data_directory,
         test_data_directory,
-        dbres_output_directory,
-        "data/models/model_BinaryPresent.pth",
-        "data/models/model_BinaryUnknown.pth",
-        bayesian=bayesian
+        model_xgb_pth=None,
+        dbres_output_directory=dbres_output_directory,
+        model_binary_pth=None,
+        model_binary_present_pth=model_binary_present_pth,
+        model_binary_unknown_pth=model_binary_unknown_pth,
+        output_directory=dbres_output_directory,
+        recordings_file="",
+        use_weights=False,
+        bayesian=bayesian,
     )
 
     return dbres_scores, xgb_scores
@@ -98,7 +114,7 @@ if __name__ == "__main__":
         default="data/stratified_data",
     )
     parser.add_argument(
-        "--vali_size", type=float, default=0.16, help="The size of the test split."
+        "--vali_size", type=float, default=0.16, help="The size of the validation split."
     )
     parser.add_argument(
         "--test_size", type=float, default=0.2, help="The size of the test split."
@@ -109,8 +125,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--recalc_features",
         action="store_true",
-        help="Whether or not to recalculate the log mel spectrograms used as "
-        "input to the ResNet.",
+        help="Whether or not to recalculate the log mel spectrograms.",
     )
     parser.add_argument(
         "--no-recalc_features", dest="recalc_features", action="store_false"
@@ -119,13 +134,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--spectrogram_directory",
         type=str,
-        help="The directory in which to save the spectrogram training data.",
         default="data/spectrograms",
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        help="The ResNet to train. Current options are resnet50 or resnet50dropout.",
         choices=["resnet50", "resnet50dropout"],
         default="resnet50dropout",
     )
@@ -141,13 +154,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dbres_output_directory",
         type=str,
-        help="The directory in which DBRes's output is saved.",
         default="data/dbres_outputs",
     )
     parser.add_argument(
-        '--disable-bayesian', 
-        dest='bayesian', 
-        action='store_false', 
+        '--disable-bayesian',
+        dest='bayesian',
+        action='store_false',
         default=True,
         help='Disable Bayesian features (default: Bayesian is enabled)'
     )
@@ -155,8 +167,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if "dropout" in args.model_name:
-        args["bayesian"] = True
+        args.bayesian = True
     else:
-        args["bayesian"] = False
+        args.bayesian = False
 
     dbres_scores, xgb_scores = main(**vars(args))

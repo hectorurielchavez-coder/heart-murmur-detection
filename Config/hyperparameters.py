@@ -6,7 +6,7 @@ dropout = 0.3
 lr = 3e-5
 max_overrun = 10
 epochs = 200
-batch_size = 128
+batch_size = 4
 pretrained = True
 # Number of classes for multi class classification
 n_classes = 3

@@ -25,7 +25,7 @@ class ResnetFull(nn.Module):
         self.fc1 = nn.Linear(2048, n_classes)
 
     def forward(self, x):
-        x = self.resnet(x).squeeze()
+        x = self.resnet(x).squeeze(-1).squeeze(-1)
         x = self.fc1(x)
         return x
 
@@ -49,7 +49,7 @@ class ResnetDropoutFull(nn.Module):
             training = True
         else:
             training = self.training
-        x = self.resnet(x).squeeze()
+        x = self.resnet(x).squeeze(-1).squeeze(-1)
         x = self.fc1(F.dropout(x, p=self.dropout, training=training))
         return x
 
@@ -126,8 +126,6 @@ def train_model(
         for batch_i, inputs in tqdm(enumerate(train_loader), total=len(train_loader)):
             x = inputs[:-1][0].repeat(1, 3, 1, 1)
             y = inputs[-1].to(device).detach()
-            if len(x) == 1:
-                x = x[0]
             optimiser.zero_grad()
             y_pred = model(x)
             loss = criterion(y_pred, y)

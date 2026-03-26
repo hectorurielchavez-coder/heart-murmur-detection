@@ -25,7 +25,7 @@ class ResnetFull(nn.Module):
         self.fc1 = nn.Linear(2048, 1)
 
     def forward(self, x):
-        x = self.resnet(x).squeeze()
+        x = self.resnet(x).squeeze(-1).squeeze(-1)
         x = self.fc1(x)
         x = torch.sigmoid(x)
         return x
@@ -49,7 +49,7 @@ class ResnetDropoutFull(nn.Module):
             training = True
         else:
             training = self.training
-        x = self.resnet(x).squeeze()
+        x = self.resnet(x).squeeze(-1).squeeze(-1)
         x = self.fc1(F.dropout(x, p=self.dropout, training=training))
         x = torch.sigmoid(x)
         return x
@@ -72,8 +72,8 @@ def make_weights_for_balanced_classes(images, nclasses):
 def build_dataloader(
     x_train, y_train, x_val=None, y_val=None, shuffle=True, sampler=None
 ):
-    x_train = x_train.clone().detach().float() #torch.tensor(x_train).float()
-    y_train = y_train.clone().detach().float() #torch.tensor(y_train).float()
+    x_train = x_train.clone().detach().float()
+    y_train = y_train.clone().detach().float()
     train_dataset = TensorDataset(x_train, y_train)
     if sampler is None:
         train_loader = DataLoader(
@@ -88,8 +88,8 @@ def build_dataloader(
         )
 
     if x_val is not None:
-        x_val = x_val.clone().detach().float() #torch.tensor(x_val).float()
-        y_val = y_val.clone().detach().float() #torch.tensor(y_val).float()
+        x_val = x_val.clone().detach().float()
+        y_val = y_val.clone().detach().float()
         val_dataset = TensorDataset(x_val, y_val)
         val_loader = DataLoader(
             val_dataset, batch_size=hyperparameters.batch_size, shuffle=shuffle
@@ -153,8 +153,8 @@ def train_model(
         all_y_pred = []
         for batch_i, inputs in enumerate(train_loader):
 
-            x = inputs[:-1][0].repeat(1, 3, 1, 1)
-            y = torch.argmax(inputs[1], dim=1, keepdim=True).float()
+            x = inputs[:-1][0].repeat(1, 3, 1, 1).to(device)  # FIX: mover batch a GPU
+            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)  # FIX
 
             optimiser.zero_grad()
             y_pred = model(x)
@@ -238,7 +238,7 @@ def train_model(
         print(f"Training epoch {e} took {round((time.time()-start_time)/60,4)} min.")
         if overrun_counter > hyperparameters.max_overrun:
             break
-    
+
     if e_saved is not None:
         checkpoint_name = f"model_{model_name}_final.pth"
         torch.save(
@@ -261,7 +261,7 @@ def train_model(
 def test_model(model, test_loader, clas_weight, criterion, device=None):
     with torch.no_grad():
         if device is None:
-            torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+            device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
         test_loss = 0.0
         model.eval()
@@ -271,11 +271,8 @@ def test_model(model, test_loader, clas_weight, criterion, device=None):
         counter = 1
         for inputs in test_loader:
 
-            x = inputs[:-1][0].repeat(1, 3, 1, 1)
-            y = torch.argmax(inputs[1], dim=1, keepdim=True).float()
-
-            if len(x) == 1:
-                x = x[0]
+            x = inputs[:-1][0].repeat(1, 3, 1, 1).to(device)  # FIX: mover batch a GPU
+            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)  # FIX
 
             y_pred = model(x)
 
