@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import balanced_accuracy_score
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
 from tqdm import tqdm
 
 from Config import hyperparameters
@@ -20,7 +20,6 @@ class ResnetFull(nn.Module):
         super(ResnetFull, self).__init__()
         self.resnet = resnet50(pretrained=hyperparameters.pretrained)
         self.n_channels = 3
-        # Remove final linear layer
         self.resnet = nn.Sequential(*(list(self.resnet.children())[:-1]))
         self.fc1 = nn.Linear(2048, 1)
 
@@ -35,14 +34,13 @@ class ResnetDropoutFull(nn.Module):
     def __init__(self, dropout=0.2, bayesian=True):
         super(ResnetDropoutFull, self).__init__()
         self.dropout = dropout
+        self.bayesian = bayesian
         self.resnet = resnet50dropout(
             pretrained=hyperparameters.pretrained, dropout_p=self.dropout, bayesian=bayesian
         )
         self.n_channels = 3
-        # Remove final linear layer
         self.resnet = nn.Sequential(*(list(self.resnet.children())[:-1]))
         self.fc1 = nn.Linear(2048, 1)
-        self.bayesian = bayesian
 
     def forward(self, x):
         if self.bayesian == True:
@@ -55,47 +53,91 @@ class ResnetDropoutFull(nn.Module):
         return x
 
 
-def make_weights_for_balanced_classes(images, nclasses):
+# ==============================================================================
+# === DATASET QUE LEE DESDE DISCO (evita cargar todo en RAM) ===
+# ==============================================================================
+class DiskDataset(Dataset):
+    """
+    Lee espectrogramas y etiquetas desde disco bajo demanda.
+    Evita el OOM que ocurre al hacer tensores_grandes.to(device).
+    """
+    def __init__(self, spec_path, label_path):
+        print(f"[DEBUG] Mapeando dataset desde disco:")
+        print(f"[DEBUG]   specs:  {spec_path}")
+        print(f"[DEBUG]   labels: {label_path}")
+        self.specs  = torch.load(spec_path,  map_location="cpu", weights_only=True)
+        self.labels = torch.load(label_path, map_location="cpu", weights_only=True).float()
+        print(f"[DEBUG] ✅ Dataset mapeado — {len(self.labels)} muestras, shape: {self.specs.shape}")
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.specs[idx].float(), self.labels[idx]
+
+
+def make_weights_for_balanced_classes(dataset, nclasses):
     count = [0] * nclasses
-    for item in images:
-        count[torch.argmax(item[1])] += 1
+    if isinstance(dataset, DiskDataset):
+        for label in dataset.labels:
+            count[torch.argmax(label)] += 1
+    else:
+        for item in dataset:
+            count[torch.argmax(item[1])] += 1
     weight_per_class = [0.0] * nclasses
     N = float(sum(count))
     for i in range(nclasses):
-        weight_per_class[i] = N / float(count[i])
-    weight = [0] * len(images)
-    for idx, val in enumerate(images):
-        weight[idx] = weight_per_class[torch.argmax(val[1])]
+        if count[i] > 0:
+            weight_per_class[i] = N / float(count[i])
+    if isinstance(dataset, DiskDataset):
+        weight = [weight_per_class[torch.argmax(label)] for label in dataset.labels]
+    else:
+        weight = [weight_per_class[torch.argmax(val[1])] for val in dataset]
     return weight
 
 
 def build_dataloader(
     x_train, y_train, x_val=None, y_val=None, shuffle=True, sampler=None
 ):
-    x_train = x_train.clone().detach().float()
-    y_train = y_train.clone().detach().float()
-    train_dataset = TensorDataset(x_train, y_train)
+    print("[DEBUG] Construyendo DataLoaders...")
+
+    # Acepta tanto paths (str) como tensores
+    if isinstance(x_train, str):
+        train_dataset = DiskDataset(x_train, y_train)
+    else:
+        x_train = x_train.clone().detach().float()
+        y_train = y_train.clone().detach().float()
+        train_dataset = TensorDataset(x_train, y_train)
+
     if sampler is None:
         train_loader = DataLoader(
-            train_dataset, batch_size=hyperparameters.batch_size, shuffle=shuffle
+            train_dataset, batch_size=hyperparameters.batch_size, shuffle=shuffle,
+            num_workers=2, pin_memory=True
         )
     else:
         weights = make_weights_for_balanced_classes(train_dataset, 2)
         weights = torch.DoubleTensor(weights)
         sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(weights))
         train_loader = DataLoader(
-            train_dataset, batch_size=hyperparameters.batch_size, sampler=sampler
+            train_dataset, batch_size=hyperparameters.batch_size, sampler=sampler,
+            num_workers=2, pin_memory=True
         )
 
     if x_val is not None:
-        x_val = x_val.clone().detach().float()
-        y_val = y_val.clone().detach().float()
-        val_dataset = TensorDataset(x_val, y_val)
+        if isinstance(x_val, str):
+            val_dataset = DiskDataset(x_val, y_val)
+        else:
+            x_val = x_val.clone().detach().float()
+            y_val = y_val.clone().detach().float()
+            val_dataset = TensorDataset(x_val, y_val)
         val_loader = DataLoader(
-            val_dataset, batch_size=hyperparameters.batch_size, shuffle=shuffle
+            val_dataset, batch_size=hyperparameters.batch_size, shuffle=False,
+            num_workers=2, pin_memory=True
         )
-
+        print("[DEBUG] ✅ DataLoaders listos (train + val).")
         return train_loader, val_loader
+
+    print("[DEBUG] ✅ DataLoaders listos (solo train).")
     return train_loader
 
 
@@ -110,7 +152,7 @@ def train_model(
     model_dir="models",
     sampler=None,
 ):
-
+    print("\n[DEBUG] >>> Iniciando train_model() <<<")
     if not os.path.isdir(model_dir):
         os.makedirs(model_dir)
 
@@ -118,19 +160,21 @@ def train_model(
         train_loader, val_loader = build_dataloader(
             x_train, y_train, x_val, y_val, sampler=sampler
         )
-
     else:
         train_loader = build_dataloader(x_train, y_train, sampler=sampler)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"[DEBUG] Dispositivo: {device}")
 
     if torch.cuda.device_count() > 1:
-        print("Using data parallel")
+        print("[DEBUG] Usando data parallel")
         model = nn.DataParallel(
             model, device_ids=list(range(torch.cuda.device_count()))
         )
 
     model = model.to(device)
+    print("[DEBUG] ✅ Modelo transferido a GPU.")
+
     criterion = nn.BCELoss()
     optimiser = optim.Adam(model.parameters(), lr=hyperparameters.lr)
 
@@ -139,11 +183,12 @@ def train_model(
     all_val_loss = []
     all_val_metric = []
     best_val_acc = -np.inf
-
     best_train_acc = -np.inf
     e_saved = None
     output_string_to_save = ""
     overrun_counter = 0
+
+    print("[DEBUG] Iniciando loop de épocas...")
     for e in range(hyperparameters.epochs):
         start_time = time.time()
         train_loss = 0.0
@@ -151,17 +196,20 @@ def train_model(
 
         all_y = []
         all_y_pred = []
-        for batch_i, inputs in enumerate(train_loader):
 
-            x = inputs[:-1][0].repeat(1, 3, 1, 1).to(device)  # FIX: mover batch a GPU
-            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)  # FIX
+        print(f"[DEBUG] ⏳ Época {e} — esperando primer batch...")
+        for batch_i, inputs in enumerate(train_loader):
+            if batch_i == 0:
+                print(f"[DEBUG] ✅ Batch 0 cargado — shape: {inputs[0].shape}. Forward pass...")
+
+            x = inputs[0].repeat(1, 3, 1, 1).to(device)
+            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)
 
             optimiser.zero_grad()
             y_pred = model(x)
+
             if clas_weight is not None:
-                criterion.weight = (clas_weight[1] - clas_weight[0]) * y + clas_weight[
-                    0
-                ]
+                criterion.weight = (clas_weight[1] - clas_weight[0]) * y + clas_weight[0]
                 loss = criterion.forward(y_pred, y)
             else:
                 loss = criterion(y_pred, y)
@@ -173,11 +221,12 @@ def train_model(
             all_y.append(y.cpu().detach())
             all_y_pred.append(y_pred.cpu().detach())
 
-            del x
-            del y
+            if batch_i == 0:
+                print("[DEBUG] ✅ Batch 0 procesado con éxito!")
+
+            del x, y
 
         all_train_loss.append(train_loss / len(train_loader))
-
         all_y = torch.cat(all_y)
         all_y_pred = torch.cat(all_y_pred)
         train_metric = balanced_accuracy_score(
@@ -191,30 +240,27 @@ def train_model(
             )
             all_val_loss.append(val_loss)
             all_val_metric.append(val_metric)
-
             acc_metric = val_metric
             best_acc_metric = best_val_acc
         else:
             acc_metric = train_metric
             best_acc_metric = best_train_acc
-        if acc_metric > best_acc_metric:
 
+        if acc_metric > best_acc_metric:
             checkpoint_name = f"model_{model_name}.pth"
             e_saved = e
             torch.save(
                 model.state_dict(),
                 os.path.join(model_dir, checkpoint_name),
             )
-            print(
-                "Saving model to:",
-                os.path.join(model_dir, checkpoint_name),
-            )
+            print(f"[DEBUG] 💾 Modelo guardado → {os.path.join(model_dir, checkpoint_name)}")
             best_train_acc = train_metric
             if x_val is not None:
                 best_val_acc = val_metric
             overrun_counter = -1
 
         overrun_counter += 1
+
         if x_val is not None:
             output_string = (
                 "Epoch: %d, Train Loss: %.8f, Train Acc: %.8f, Val Loss: %.8f, "
@@ -235,8 +281,10 @@ def train_model(
             )
         print(output_string)
         output_string_to_save += output_string + "\n"
-        print(f"Training epoch {e} took {round((time.time()-start_time)/60,4)} min.")
+        print(f"[DEBUG] Época {e} completada en {round((time.time()-start_time)/60, 4)} min.")
+
         if overrun_counter > hyperparameters.max_overrun:
+            print(f"[DEBUG] Early stopping en época {e} (overrun={overrun_counter})")
             break
 
     if e_saved is not None:
@@ -245,12 +293,8 @@ def train_model(
             model.state_dict(),
             os.path.join(model_dir, checkpoint_name),
         )
-        print(
-            "Saving model to:",
-            os.path.join(model_dir, checkpoint_name),
-        )
+        print(f"[DEBUG] 💾 Modelo final guardado → {os.path.join(model_dir, checkpoint_name)}")
 
-    # Save output string
     output_string_to_save += f"Best epoch: {e_saved}\n"
     with open(os.path.join(model_dir, f"output_{model_name}.txt"), "w") as f:
         f.write(output_string_to_save)
@@ -269,28 +313,27 @@ def test_model(model, test_loader, clas_weight, criterion, device=None):
         all_y = []
         all_y_pred = []
         counter = 1
-        for inputs in test_loader:
 
-            x = inputs[:-1][0].repeat(1, 3, 1, 1).to(device)  # FIX: mover batch a GPU
-            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)  # FIX
+        for inputs in test_loader:
+            x = inputs[0].repeat(1, 3, 1, 1).to(device)
+            y = torch.argmax(inputs[1], dim=1, keepdim=True).float().to(device)
+
+            if len(x) == 1:
+                x = x[0]
 
             y_pred = model(x)
 
             if clas_weight is not None:
-                criterion.weight = (clas_weight[1] - clas_weight[0]) * y + clas_weight[
-                    0
-                ]
+                criterion.weight = (clas_weight[1] - clas_weight[0]) * y + clas_weight[0]
                 loss = criterion.forward(y_pred, y)
             else:
                 loss = criterion(y_pred, y)
+
             test_loss += loss.item()
             all_y.append(y.cpu().detach())
             all_y_pred.append(y_pred.cpu().detach())
 
-            del x
-            del y
-            del y_pred
-
+            del x, y, y_pred
             counter += 1
 
         all_y = torch.cat(all_y)
@@ -304,11 +347,11 @@ def test_model(model, test_loader, clas_weight, criterion, device=None):
 
 
 def load_model(filepath, model=ResnetDropoutFull()):
-
+    print(f"[DEBUG] Cargando modelo desde: {filepath}")
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
     if torch.cuda.device_count() > 1:
-        print("Using data parallel")
+        print("[DEBUG] Usando data parallel")
         model = nn.DataParallel(
             model, device_ids=list(range(torch.cuda.device_count()))
         )
@@ -320,6 +363,7 @@ def load_model(filepath, model=ResnetDropoutFull()):
         map_location = lambda storage, loc: storage.mps()
     else:
         map_location = torch.device("cpu")
-    model.load_state_dict(torch.load(filepath, map_location=map_location))
 
+    model.load_state_dict(torch.load(filepath, map_location=map_location))
+    print(f"[DEBUG] ✅ Modelo cargado exitosamente.")
     return model
